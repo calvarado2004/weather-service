@@ -5,13 +5,45 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/calvarado2004/weather-service/models"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+var (
+	weatherRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "weather_requests_total",
+			Help: "Total number of weather requests made.",
+		},
+		[]string{"city"},
+	)
+	weatherRequestFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "weather_request_failures_total",
+			Help: "Total number of failed weather requests.",
+		},
+		[]string{"city"},
+	)
+	rabbitmqMessageSendTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "rabbitmq_message_send_total",
+			Help: "Total number of messages sent to RabbitMQ.",
+		},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(weatherRequestsTotal)
+	prometheus.MustRegister(weatherRequestFailuresTotal)
+	prometheus.MustRegister(rabbitmqMessageSendTotal)
+}
 
 func main() {
 
@@ -31,6 +63,11 @@ func main() {
 	currentWeatherURL := "https://api.weatherapi.com/v1/current.json"
 	forecastWeatherURL := "https://api.weatherapi.com/v1/forecast.json"
 
+	http.Handle("/metrics", promhttp.Handler())
+	go func() {
+		log.Fatal(http.ListenAndServe(":8082", nil))
+	}()
+
 	// Get weather data, loop every 15 minutes
 	for {
 		err := retrieveWeather(ctx, apiKey, currentWeatherURL, forecastWeatherURL, mySendToQueue)
@@ -46,6 +83,8 @@ func main() {
 func retrieveWeather(ctx context.Context, apiKey, currentWeatherURL, forecastWeatherURL string, sendFunc func(service RabbitMQService, data interface{}, context context.Context) error) error {
 	City := "Atlanta"
 
+	weatherRequestsTotal.WithLabelValues(City).Inc()
+
 	weatherData, err := getWeatherData(apiKey, City, currentWeatherURL)
 	if err != nil {
 		return fmt.Errorf("error getting weather data: %w", err)
@@ -57,6 +96,7 @@ func retrieveWeather(ctx context.Context, apiKey, currentWeatherURL, forecastWea
 
 	forecastResponse, err := getWeatherAlerts(apiKey, City, forecastWeatherURL)
 	if err != nil {
+		weatherRequestFailuresTotal.WithLabelValues(City).Inc()
 		return fmt.Errorf("error getting weather alerts: %w", err)
 	}
 
@@ -80,6 +120,8 @@ func retrieveWeather(ctx context.Context, apiKey, currentWeatherURL, forecastWea
 	if err != nil {
 		return fmt.Errorf("error sending message to queue: %w", err)
 	}
+
+	rabbitmqMessageSendTotal.Inc()
 
 	log.Printf("Sent weather message to queue: %v\n", rabbitMessage)
 
